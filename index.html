@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="en">
 <head>
@@ -29,6 +30,7 @@
   const stopButton = document.getElementById('stop');
   const message = document.getElementById('message');
   let handlingResult = false;
+  let starting = false;
 
   function setMessage(text, isError) {
     message.textContent = text;
@@ -62,6 +64,8 @@
   }
 
   async function startScanner() {
+    if (starting || reader.isScanning) return;
+    starting = true;
     handlingResult = false;
     startButton.disabled = true;
     setMessage('Starting rear camera…', false);
@@ -81,12 +85,14 @@
     } catch (error) {
       setMessage('Camera could not start. Open this page over HTTPS and allow camera access in the browser and phone settings.', true);
     } finally {
+      starting = false;
       startButton.disabled = false;
     }
   }
 
   startButton.addEventListener('click', startScanner);
   stopButton.addEventListener('click', stopScanner);
+  window.addEventListener('load', function(){setTimeout(startScanner,350);});
 </script>
 </body>
 </html>
