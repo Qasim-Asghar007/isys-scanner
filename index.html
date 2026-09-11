@@ -13,7 +13,8 @@
     #reader{width:100%;overflow:hidden;border-radius:14px;background:#101828}.hero{text-align:center;padding:24px 14px;border-radius:14px;background:#f8fafc}.icon{font-size:58px}.state{font-size:24px;font-weight:800;margin-top:8px}
     .meta{margin:18px 0;border-top:1px solid #eaecf0}.row{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid #eaecf0}.label{color:#667085}.value{text-align:right;font-weight:700}
     button{width:100%;border:0;border-radius:12px;padding:14px 16px;font-size:16px;font-weight:800;cursor:pointer;background:var(--blue);color:#fff;margin-top:14px}button.secondary{background:#fff;color:#344054;border:1px solid var(--line)}button:disabled{opacity:.55}
-    .message{text-align:center;margin:14px 0 0;color:#667085;line-height:1.5}.error{color:var(--red)}.success .state{color:var(--green)}.failure .state{color:var(--red)}[hidden]{display:none!important}
+    .message{text-align:center;margin:14px 0 0;color:#667085;line-height:1.5}.error{color:var(--red)}.success .state{color:var(--green)}.failure .state{color:var(--red)}
+    .processing{text-align:center;padding:30px 18px;border:1px solid #dbe4ff;border-radius:14px;background:#f5f8ff}.spinner{width:48px;height:48px;margin:0 auto 18px;border:5px solid #dbe4ff;border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite}.progress-title{font-size:22px;font-weight:800;color:var(--blue)}.progress-detail{margin-top:10px;color:#475467;line-height:1.5}.progress-elapsed{margin-top:12px;font-size:13px;font-weight:700;color:#667085}@keyframes spin{to{transform:rotate(360deg)}}[hidden]{display:none!important}
   </style>
 </head>
 <body>
@@ -22,6 +23,12 @@
   <div id="scannerPane">
     <h1>Live ticket scanner</h1>
     <div id="reader"></div>
+    <div id="processing" class="processing" role="status" aria-live="polite" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <div id="progressTitle" class="progress-title">Processing ticket</div>
+      <div id="progressDetail" class="progress-detail">Contacting the check-in service…</div>
+      <div id="progressElapsed" class="progress-elapsed">Elapsed: 0 seconds</div>
+    </div>
     <button id="start" type="button">Start live scanner</button>
     <button id="stop" class="secondary" type="button" hidden>Stop camera</button>
     <p id="message" class="message">Use the rear camera. Hold the complete QR square inside the frame.</p>
@@ -41,16 +48,54 @@
   const stopButton = document.getElementById('stop');
   const nextButton = document.getElementById('next');
   const message = document.getElementById('message');
+  const readerElement = document.getElementById('reader');
+  const processingPane = document.getElementById('processing');
+  const progressTitle = document.getElementById('progressTitle');
+  const progressDetail = document.getElementById('progressDetail');
+  const progressElapsed = document.getElementById('progressElapsed');
   let handlingResult = false;
   let starting = false;
+  let scannerPaused = false;
+  let progressStartedAt = 0;
+  let progressTimer = null;
 
   function setMessage(text, isError) {
     message.textContent = text;
     message.className = 'message' + (isError ? ' error' : '');
   }
 
+  function updateProgress(title, detail) {
+    progressTitle.textContent = title;
+    progressDetail.textContent = detail;
+  }
+
+  function beginProgress(title, detail) {
+    if (progressTimer) clearInterval(progressTimer);
+    progressStartedAt = Date.now();
+    readerElement.hidden = true;
+    processingPane.hidden = false;
+    message.hidden = true;
+    startButton.hidden = true;
+    stopButton.hidden = true;
+    updateProgress(title, detail);
+    progressElapsed.textContent = 'Elapsed: 0 seconds';
+    progressTimer = setInterval(function() {
+      const seconds = Math.floor((Date.now() - progressStartedAt) / 1000);
+      progressElapsed.textContent = 'Elapsed: ' + seconds + (seconds === 1 ? ' second' : ' seconds');
+    }, 500);
+  }
+
+  function endProgress() {
+    if (progressTimer) clearInterval(progressTimer);
+    progressTimer = null;
+    processingPane.hidden = true;
+    readerElement.hidden = false;
+    message.hidden = false;
+  }
+
   async function stopScanner() {
     try { if (reader.isScanning) await reader.stop(); } catch (_) {}
+    scannerPaused = false;
     startButton.hidden = false;
     stopButton.hidden = true;
   }
@@ -58,14 +103,27 @@
   function backendRequest(endpoint, token, pin, staff) {
     return new Promise(function(resolve, reject) {
       const callbackName = 'isysCallback' + Date.now() + Math.floor(Math.random() * 100000);
+      updateProgress('Contacting Google', 'Opening the secure Apps Script check-in service…');
+      const stageTimers = [
+        setTimeout(function() {
+          updateProgress('Reading ticket database', 'Google Apps Script is locating this ticket in the event sheet…');
+        }, 3000),
+        setTimeout(function() {
+          updateProgress('Verifying check-in', 'Checking whether the ticket is valid or has already been scanned…');
+        }, 8000),
+        setTimeout(function() {
+          updateProgress('Still processing safely', 'Google is taking longer than usual. Keep this page open and do not scan the QR again.');
+        }, 18000),
+      ];
       const script = document.createElement('script');
       const timer = setTimeout(function() {
         cleanup();
-        reject(new Error('The check-in service did not respond. Confirm the Apps Script deployment allows Anyone access.'));
-      }, 20000);
+        reject(new Error('Google did not finish the check-in within 60 seconds. Wait a moment, then scan the ticket once to confirm its status.'));
+      }, 60000);
 
       function cleanup() {
         clearTimeout(timer);
+        stageTimers.forEach(clearTimeout);
         delete window[callbackName];
         if (script.parentNode) script.parentNode.removeChild(script);
       }
@@ -104,6 +162,7 @@
   }
 
   function showResult(result) {
+    endProgress();
     scannerPane.hidden = true;
     resultPane.hidden = false;
     const hero = document.getElementById('resultHero');
@@ -129,7 +188,7 @@
     }
   }
 
-  async function verifyAndCheckIn(endpoint, token, retrying) {
+  async function verifyAndCheckIn(endpoint, token, authRetried, busyAttempts) {
     let pin = localStorage.getItem('isysStaffPin');
     if (!pin) {
       pin = prompt('Enter the staff check-in PIN:');
@@ -143,10 +202,23 @@
     }
     try {
       const result = await backendRequest(endpoint, token, pin, staff);
-      if (result.code === 'AUTH' && !retrying) {
+      if (result.code === 'AUTH' && !authRetried) {
         localStorage.removeItem('isysStaffPin');
         alert('Incorrect staff PIN. Please enter it again.');
-        await verifyAndCheckIn(endpoint, token, true);
+        await verifyAndCheckIn(endpoint, token, true, busyAttempts);
+        return;
+      }
+      if (result.code === 'BUSY' && busyAttempts < 5) {
+        updateProgress(
+          'Waiting for another check-in',
+          'Another ticket is being saved. Automatic retry ' + (busyAttempts + 1) + ' of 5…'
+        );
+        await new Promise(function(resolve) { setTimeout(resolve, 800); });
+        await verifyAndCheckIn(endpoint, token, authRetried, busyAttempts + 1);
+        return;
+      }
+      if (result.code === 'BUSY') {
+        showResult({code:'ERROR', message:'The check-in service is busy. Wait a moment, then press Scan next ticket and try once more.'});
         return;
       }
       showResult(result);
@@ -169,18 +241,50 @@
       return;
     }
     handlingResult = true;
-    setMessage('Ticket found. Checking in…', false);
-    await stopScanner();
-    await verifyAndCheckIn(url.origin + url.pathname, token, false);
+    beginProgress('QR captured', 'Preparing the ticket for secure verification…');
+    // Keep the camera stream open between tickets. Pausing is immediate and
+    // resuming it is much faster and more reliable than stop/start on phones.
+    try {
+      reader.pause(true);
+      scannerPaused = true;
+    } catch (_) {
+      await stopScanner();
+    }
+    await verifyAndCheckIn(url.origin + url.pathname, token, false, 0);
   }
 
   async function startScanner() {
-    if (starting || reader.isScanning) return;
+    if (starting) return;
     starting = true;
     handlingResult = false;
     scannerPane.hidden = false;
     resultPane.hidden = true;
+    endProgress();
     startButton.disabled = true;
+
+    if (reader.isScanning && scannerPaused) {
+      try {
+        reader.resume();
+        scannerPaused = false;
+        startButton.hidden = true;
+        stopButton.hidden = false;
+        setMessage('Scanner ready — center the QR and hold steady.', false);
+        return;
+      } catch (_) {
+        try { await reader.stop(); } catch (_) {}
+        scannerPaused = false;
+      } finally {
+        starting = false;
+        startButton.disabled = false;
+      }
+    }
+
+    if (reader.isScanning) {
+      starting = false;
+      startButton.disabled = false;
+      return;
+    }
+
     setMessage('Starting rear camera…', false);
     const width = Math.min(300, Math.max(210, document.querySelector('.card').clientWidth - 90));
     const config = {fps:15,qrbox:{width:width,height:width},aspectRatio:1.777778,disableFlip:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}};
