@@ -6,27 +6,40 @@
   <title>ISYS 2026 Live Ticket Scanner</title>
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <style>
-    :root{color-scheme:light;--navy:#101828;--blue:#175cd3;--red:#b42318;--line:#d0d5dd}
+    :root{color-scheme:light;--navy:#101828;--blue:#175cd3;--green:#067647;--red:#b42318;--line:#d0d5dd}
     *{box-sizing:border-box}body{margin:0;background:#eef2f6;font-family:Arial,sans-serif;color:var(--navy)}
     main{min-height:100vh;display:grid;place-items:center;padding:18px}.card{width:min(100%,480px);background:#fff;border-radius:20px;padding:22px;box-shadow:0 14px 40px #10182818}
     .brand{text-align:center;font-size:13px;font-weight:700;letter-spacing:2px;color:#475467}h1{text-align:center;margin:8px 0 18px}
-    #reader{width:100%;overflow:hidden;border-radius:14px;background:#101828}button{width:100%;border:0;border-radius:12px;padding:14px 16px;font-size:16px;font-weight:800;cursor:pointer;background:var(--blue);color:#fff;margin-top:14px}
-    button.secondary{background:#fff;color:#344054;border:1px solid var(--line)}button:disabled{opacity:.55}.message{text-align:center;margin:14px 0 0;color:#667085;line-height:1.5}.error{color:var(--red)}
+    #reader{width:100%;overflow:hidden;border-radius:14px;background:#101828}.hero{text-align:center;padding:24px 14px;border-radius:14px;background:#f8fafc}.icon{font-size:58px}.state{font-size:24px;font-weight:800;margin-top:8px}
+    .meta{margin:18px 0;border-top:1px solid #eaecf0}.row{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid #eaecf0}.label{color:#667085}.value{text-align:right;font-weight:700}
+    button{width:100%;border:0;border-radius:12px;padding:14px 16px;font-size:16px;font-weight:800;cursor:pointer;background:var(--blue);color:#fff;margin-top:14px}button.secondary{background:#fff;color:#344054;border:1px solid var(--line)}button:disabled{opacity:.55}
+    .message{text-align:center;margin:14px 0 0;color:#667085;line-height:1.5}.error{color:var(--red)}.success .state{color:var(--green)}.failure .state{color:var(--red)}[hidden]{display:none!important}
   </style>
 </head>
 <body>
 <main><section class="card">
   <div class="brand">ISYS 2026</div>
-  <h1>Live ticket scanner</h1>
-  <div id="reader"></div>
-  <button id="start" type="button">Start live scanner</button>
-  <button id="stop" class="secondary" type="button" hidden>Stop camera</button>
-  <p id="message" class="message">Use the rear camera. Hold the complete QR square inside the frame.</p>
+  <div id="scannerPane">
+    <h1>Live ticket scanner</h1>
+    <div id="reader"></div>
+    <button id="start" type="button">Start live scanner</button>
+    <button id="stop" class="secondary" type="button" hidden>Stop camera</button>
+    <p id="message" class="message">Use the rear camera. Hold the complete QR square inside the frame.</p>
+  </div>
+  <div id="resultPane" hidden>
+    <div id="resultHero" class="hero"><div id="resultIcon" class="icon"></div><div id="resultState" class="state"></div></div>
+    <p id="resultMessage" class="message"></p>
+    <div id="resultMeta" class="meta"></div>
+    <button id="next" type="button">Scan next ticket</button>
+  </div>
 </section></main>
 <script>
   const reader = new Html5Qrcode('reader', {verbose:false});
+  const scannerPane = document.getElementById('scannerPane');
+  const resultPane = document.getElementById('resultPane');
   const startButton = document.getElementById('start');
   const stopButton = document.getElementById('stop');
+  const nextButton = document.getElementById('next');
   const message = document.getElementById('message');
   let handlingResult = false;
   let starting = false;
@@ -42,47 +55,142 @@
     stopButton.hidden = true;
   }
 
+  function backendRequest(endpoint, token, pin, staff) {
+    return new Promise(function(resolve, reject) {
+      const callbackName = 'isysCallback' + Date.now() + Math.floor(Math.random() * 100000);
+      const script = document.createElement('script');
+      const timer = setTimeout(function() {
+        cleanup();
+        reject(new Error('The check-in service did not respond. Confirm the Apps Script deployment allows Anyone access.'));
+      }, 20000);
+
+      function cleanup() {
+        clearTimeout(timer);
+        delete window[callbackName];
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+
+      window[callbackName] = function(result) {
+        cleanup();
+        resolve(result);
+      };
+      script.onerror = function() {
+        cleanup();
+        reject(new Error('Could not contact the Apps Script check-in service.'));
+      };
+      script.src = endpoint + '?api=checkin' +
+        '&token=' + encodeURIComponent(token) +
+        '&pin=' + encodeURIComponent(pin) +
+        '&staff=' + encodeURIComponent(staff) +
+        '&callback=' + encodeURIComponent(callbackName) +
+        '&_=' + Date.now();
+      document.head.appendChild(script);
+    });
+  }
+
+  function addMeta(label, value) {
+    if (!value) return;
+    const row = document.createElement('div');
+    row.className = 'row';
+    const key = document.createElement('span');
+    key.className = 'label';
+    key.textContent = label;
+    const data = document.createElement('span');
+    data.className = 'value';
+    data.textContent = value;
+    row.appendChild(key);
+    row.appendChild(data);
+    document.getElementById('resultMeta').appendChild(row);
+  }
+
+  function showResult(result) {
+    scannerPane.hidden = true;
+    resultPane.hidden = false;
+    const hero = document.getElementById('resultHero');
+    const icon = document.getElementById('resultIcon');
+    const state = document.getElementById('resultState');
+    const detail = document.getElementById('resultMessage');
+    document.getElementById('resultMeta').innerHTML = '';
+
+    if (result.code === 'CHECKED_IN') {
+      hero.className = 'hero success'; icon.textContent = '✅'; state.textContent = 'GROUP CHECKED IN';
+      detail.textContent = 'The group ticket is now used.';
+      addMeta('Ticket', result.ticketId); addMeta('Group members', result.name); addMeta('Time', result.checkedInAt);
+    } else if (result.code === 'USED') {
+      hero.className = 'hero failure'; icon.textContent = '❌'; state.textContent = 'ALREADY SCANNED';
+      detail.textContent = 'This group QR was already used and cannot check in again.';
+      addMeta('Ticket', result.ticketId); addMeta('Group members', result.name); addMeta('First check-in', result.checkedInAt); addMeta('By', result.checkedInBy);
+    } else if (result.code === 'INVALID') {
+      hero.className = 'hero failure'; icon.textContent = '❌'; state.textContent = 'INVALID TICKET';
+      detail.textContent = 'This QR is not an active ticket in the database.';
+    } else {
+      hero.className = 'hero failure'; icon.textContent = '⚠️'; state.textContent = 'CHECK-IN ERROR';
+      detail.textContent = result.message || 'The ticket could not be checked in.';
+    }
+  }
+
+  async function verifyAndCheckIn(endpoint, token, retrying) {
+    let pin = localStorage.getItem('isysStaffPin');
+    if (!pin) {
+      pin = prompt('Enter the staff check-in PIN:');
+      if (!pin) { showResult({code:'ERROR', message:'Check-in was cancelled.'}); return; }
+      localStorage.setItem('isysStaffPin', pin);
+    }
+    let staff = localStorage.getItem('isysStaffName');
+    if (!staff) {
+      staff = prompt('Volunteer name for the check-in log:', 'Entrance 1') || 'Entrance volunteer';
+      localStorage.setItem('isysStaffName', staff);
+    }
+    try {
+      const result = await backendRequest(endpoint, token, pin, staff);
+      if (result.code === 'AUTH' && !retrying) {
+        localStorage.removeItem('isysStaffPin');
+        alert('Incorrect staff PIN. Please enter it again.');
+        await verifyAndCheckIn(endpoint, token, true);
+        return;
+      }
+      showResult(result);
+    } catch (error) {
+      showResult({code:'ERROR', message:error.message});
+    }
+  }
+
   async function onDecoded(decodedText) {
     if (handlingResult) return;
-    handlingResult = true;
     let url;
     try { url = new URL(decodedText); } catch (_) {
-      handlingResult = false;
       setMessage('That QR does not contain a valid ticket URL.', true);
       return;
     }
+    const token = url.searchParams.get('token');
     if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' ||
-        !url.pathname.includes('/macros/s/') || !url.searchParams.get('token')) {
-      handlingResult = false;
+        !url.pathname.includes('/macros/s/') || !token) {
       setMessage('That is not an ISYS ticket QR.', true);
       return;
     }
-    setMessage('Ticket found. Opening verification…', false);
+    handlingResult = true;
+    setMessage('Ticket found. Checking in…', false);
     await stopScanner();
-    location.assign(url.href);
+    await verifyAndCheckIn(url.origin + url.pathname, token, false);
   }
 
   async function startScanner() {
     if (starting || reader.isScanning) return;
     starting = true;
     handlingResult = false;
+    scannerPane.hidden = false;
+    resultPane.hidden = true;
     startButton.disabled = true;
     setMessage('Starting rear camera…', false);
     const width = Math.min(300, Math.max(210, document.querySelector('.card').clientWidth - 90));
-    const config = {
-      fps: 15,
-      qrbox: {width: width, height: width},
-      aspectRatio: 1.777778,
-      disableFlip: false,
-      experimentalFeatures: {useBarCodeDetectorIfSupported: true}
-    };
+    const config = {fps:15,qrbox:{width:width,height:width},aspectRatio:1.777778,disableFlip:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}};
     try {
       await reader.start({facingMode:'environment'}, config, onDecoded, function(){});
       startButton.hidden = true;
       stopButton.hidden = false;
       setMessage('Scanner ready — center the QR and hold steady.', false);
-    } catch (error) {
-      setMessage('Camera could not start. Open this page over HTTPS and allow camera access in the browser and phone settings.', true);
+    } catch (_) {
+      setMessage('Camera could not start. Open this GitHub page over HTTPS and allow camera access.', true);
     } finally {
       starting = false;
       startButton.disabled = false;
@@ -91,6 +199,7 @@
 
   startButton.addEventListener('click', startScanner);
   stopButton.addEventListener('click', stopScanner);
+  nextButton.addEventListener('click', startScanner);
   window.addEventListener('load', function(){setTimeout(startScanner,350);});
 </script>
 </body>
