@@ -41,7 +41,11 @@
   </div>
 </section></main>
 <script>
-  const reader = new Html5Qrcode('reader', {verbose:false});
+  const CHECKIN_ENDPOINT = 'https://script.google.com/macros/s/AKfycbwNxEkajRFaAX43589ST3MWtUMjohSJ2v1xEFmnommAMHDUxcTAOnni0MMdLzAvpz8EIQ/exec';
+  const reader = new Html5Qrcode('reader', {
+    formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
+    experimentalFeatures: {useBarCodeDetectorIfSupported: true}
+  });
   const scannerPane = document.getElementById('scannerPane');
   const resultPane = document.getElementById('resultPane');
   const startButton = document.getElementById('start');
@@ -229,14 +233,31 @@
 
   async function onDecoded(decodedText) {
     if (handlingResult) return;
-    let url;
-    try { url = new URL(decodedText); } catch (_) {
-      setMessage('That QR does not contain a valid ticket URL.', true);
-      return;
+    const decoded = String(decodedText || '').trim();
+    let endpoint = CHECKIN_ENDPOINT;
+    let token = '';
+
+    // New compact tickets contain only ISYS:<token>. Continue accepting the
+    // older full Apps Script URLs so previously emailed tickets still work.
+    const compactTicket = /^ISYS:([0-9a-f]{32,64})$/i.exec(decoded);
+    if (compactTicket) {
+      token = compactTicket[1].toLowerCase();
+    } else {
+      let url;
+      try { url = new URL(decoded); } catch (_) {
+        setMessage('That QR is not an ISYS ticket.', true);
+        return;
+      }
+      token = url.searchParams.get('token') || '';
+      if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' ||
+          !url.pathname.includes('/macros/s/') || !token) {
+        setMessage('That QR is not an ISYS ticket.', true);
+        return;
+      }
+      endpoint = url.origin + url.pathname;
     }
-    const token = url.searchParams.get('token');
-    if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' ||
-        !url.pathname.includes('/macros/s/') || !token) {
+
+    if (!/^[0-9a-f]{32,64}$/i.test(token)) {
       setMessage('That is not an ISYS ticket QR.', true);
       return;
     }
@@ -250,7 +271,7 @@
     } catch (_) {
       await stopScanner();
     }
-    await verifyAndCheckIn(url.origin + url.pathname, token, false, 0);
+    await verifyAndCheckIn(endpoint, token, false, 0);
   }
 
   async function startScanner() {
@@ -286,8 +307,14 @@
     }
 
     setMessage('Starting rear camera…', false);
-    const width = Math.min(300, Math.max(210, document.querySelector('.card').clientWidth - 90));
-    const config = {fps:15,qrbox:{width:width,height:width},aspectRatio:1.777778,disableFlip:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}};
+    const config = {
+      fps: 15,
+      qrbox: function(viewfinderWidth, viewfinderHeight) {
+        const edge = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.82);
+        return {width: edge, height: edge};
+      },
+      disableFlip: true
+    };
     try {
       await reader.start({facingMode:'environment'}, config, onDecoded, function(){});
       startButton.hidden = true;
